@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # 不会在用户服务器构建镜像，也不需要源码仓库。
 #
 # 快速使用：
-#   curl -fsSL https://raw.githubusercontent.com/bohu-t/frp-manager-lite/main/scripts/deploy-image-production.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/bohu-t/lite-install/main/deploy-image-production.sh | sudo bash
 #
 # 默认从阿里云 ACR 公开仓库拉取镜像：
 #   registry.cn-hangzhou.aliyuncs.com/dxlx/frp-manager-lite:latest
@@ -891,7 +891,7 @@ print_summary() {
   echo ''
   echo '【常用命令】'
   echo "  改配置：    nano ${ENV_FILE}"
-  echo "  重新部署：  curl -fsSL https://raw.githubusercontent.com/bohu-t/frp-manager-lite/main/scripts/deploy-image-production.sh | sudo bash"
+  echo "  重新部署：  curl -fsSL https://raw.githubusercontent.com/bohu-t/lite-install/main/deploy-image-production.sh | sudo bash"
   echo "  面板升级：  cd ${APP_DIR} && docker compose pull && docker compose up -d"
   echo "  面板日志：  cd ${APP_DIR} && docker compose logs -f"
   echo "  frps 日志： journalctl -u frps -f"
