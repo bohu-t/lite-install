@@ -823,7 +823,7 @@ guard_existing_qdisc(){
     warn "将覆盖现有 root qdisc：$line"
     return 0
   fi
-  if grep -Eq 'qdisc (fq_codel|pfifo_fast|noqueue) ' <<< "$line"; then
+  if grep -Eq 'qdisc (fq_codel|pfifo_fast|noqueue|mq) ' <<< "$line"; then
     warn "将替换系统默认 root qdisc：$line"
     return 0
   fi
