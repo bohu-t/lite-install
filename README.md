@@ -28,3 +28,9 @@ sudo -E bash deploy-image-production.sh
 ## Update script
 
 This repository should be updated whenever the private `frp-manager-lite` deployment script changes.
+
+## 添加 frps 节点
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/bohu-t/lite-install/main/add-frps-node.sh)
+```
