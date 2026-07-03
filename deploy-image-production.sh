@@ -203,6 +203,38 @@ write_env_var() {
   printf '%s=%s\n' "$1" "$(env_value "${2:-}")" >> "${ENV_FILE}"
 }
 
+set_env_var() {
+  local key="$1" value="${2:-}"
+  mkdir -p "$(dirname "${ENV_FILE}")"
+  if [[ ! -f "${ENV_FILE}" ]]; then
+    : > "${ENV_FILE}"
+    chmod 600 "${ENV_FILE}"
+  fi
+  python3 - "${ENV_FILE}" "${key}" "${value}" <<'PYENV'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+def quote(v: str) -> str:
+    return '"' + v.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\$').replace('`', '\`') + '"'
+
+lines = path.read_text().splitlines() if path.exists() else []
+out = []
+done = False
+for line in lines:
+    if line.strip() and not line.lstrip().startswith('#') and line.split('=', 1)[0] == key:
+        out.append(f'{key}={quote(value)}')
+        done = True
+    else:
+        out.append(line)
+if not done:
+    out.append(f'{key}={quote(value)}')
+path.write_text('\n'.join(out) + '\n')
+PYENV
+}
+
 load_env_file() {
   if [[ ! -f "${ENV_FILE}" ]]; then
     err "找不到配置文件：${ENV_FILE}"
@@ -423,6 +455,57 @@ start_panel() {
   warn "面板 60 秒内未就绪，请检查：cd ${APP_DIR} && docker compose logs --tail=100"
 }
 
+restart_panel() {
+  cd "${APP_DIR}"
+  docker compose up -d --force-recreate frp-manager-lite
+  log "等待面板重建后就绪…"
+  for _ in $(seq 1 30); do
+    if curl -fsS "http://127.0.0.1:${FML_PUBLISH_PORT}/api/nodes" >/dev/null 2>&1; then
+      log "面板已就绪：http://127.0.0.1:${FML_PUBLISH_PORT}"
+      return 0
+    fi
+    sleep 2
+  done
+  warn "面板重建后 60 秒内未就绪，请检查：cd ${APP_DIR} && docker compose logs --tail=100"
+}
+
+sync_default_node_web_port() {
+  if ! docker inspect frp-manager-lite >/dev/null 2>&1; then
+    warn "未找到面板容器，跳过默认节点 web_port 同步"
+    return 0
+  fi
+  if docker exec -e FRPS_WEB_PORT="${FRPS_WEB_PORT}" frp-manager-lite python -c 'import os, sqlite3; db=os.environ.get("FML_DB","/data/data.sqlite3"); port=int(os.environ.get("FRPS_WEB_PORT") or 0); conn=sqlite3.connect(db); conn.execute("UPDATE nodes SET web_port=? WHERE id=(SELECT id FROM nodes ORDER BY id LIMIT 1)", (port,)); conn.commit(); print(port)' >/tmp/fml-sync-web-port.log 2>&1; then
+    log "默认节点 frps dashboard 端口已同步：$(cat /tmp/fml-sync-web-port.log)"
+  else
+    warn "默认节点 web_port 同步失败：$(tail -n 1 /tmp/fml-sync-web-port.log 2>/dev/null || true)"
+  fi
+}
+
+configure_frps_dashboard_bridge() {
+  local gateway
+  gateway="$(docker inspect frp-manager-lite --format '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
+  if [[ -z "${gateway}" ]]; then
+    warn "未能识别 Docker 网桥网关，frps dashboard 将仅监听 127.0.0.1，面板监控可能不可用。"
+    FRPS_DASHBOARD_BIND_ADDR="127.0.0.1"
+    return 0
+  fi
+
+  FRPS_DASHBOARD_BIND_ADDR="${FRPS_DASHBOARD_BIND_ADDR:-${gateway}}"
+  FML_FRPS_DASHBOARD_URL="${FML_FRPS_DASHBOARD_URL:-http://${FRPS_DASHBOARD_BIND_ADDR}:${FRPS_WEB_PORT}}"
+  FML_FRPS_DASHBOARD_USER="${FML_FRPS_DASHBOARD_USER:-admin}"
+  FML_FRPS_DASHBOARD_PASSWORD="${FML_FRPS_DASHBOARD_PASSWORD:-${FRPS_WEB_PASSWORD}}"
+
+  set_env_var FRPS_DASHBOARD_BIND_ADDR "${FRPS_DASHBOARD_BIND_ADDR}"
+  set_env_var FML_FRPS_DASHBOARD_URL "${FML_FRPS_DASHBOARD_URL}"
+  set_env_var FML_FRPS_DASHBOARD_USER "${FML_FRPS_DASHBOARD_USER}"
+  set_env_var FML_FRPS_DASHBOARD_PASSWORD "${FML_FRPS_DASHBOARD_PASSWORD}"
+  sync_default_node_web_port
+
+  log "frps dashboard 将监听 Docker 内网 ${FRPS_DASHBOARD_BIND_ADDR}:${FRPS_WEB_PORT}，面板监控地址 ${FML_FRPS_DASHBOARD_URL}"
+  load_env_file
+  restart_panel
+}
+
 detect_system_arch() {
   SYSTEM_ARCH="$(uname -m)"
   case "${SYSTEM_ARCH}" in
@@ -486,7 +569,7 @@ allowPorts = [
 transport.tcpMux = true
 transport.maxPoolCount = 5
 
-webServer.addr = "127.0.0.1"
+webServer.addr = "${FRPS_DASHBOARD_BIND_ADDR:-127.0.0.1}"
 webServer.port = ${FRPS_WEB_PORT}
 webServer.user = "admin"
 webServer.password = "${FRPS_WEB_PASSWORD}"
@@ -839,6 +922,91 @@ TIMER
   log "端口速率策略同步已启用：systemctl status fml-port-rate-limit.timer"
 }
 
+
+run_post_deploy_checks() {
+  local failures=0 dashboard_json
+  log "执行部署后自检…"
+
+  if curl -fsS "http://127.0.0.1:${FML_PUBLISH_PORT}/api/nodes" >/dev/null; then
+    log "自检通过：面板 API 可访问"
+  else
+    warn "自检失败：面板 API 不可访问"
+    failures=$((failures + 1))
+  fi
+
+  if systemctl is-active --quiet frps; then
+    log "自检通过：frps 服务运行中"
+  else
+    warn "自检失败：frps 服务未运行"
+    failures=$((failures + 1))
+  fi
+
+  if grep -q 'enablePrometheus' /etc/frp/frps.toml 2>/dev/null; then
+    warn "自检失败：frps.toml 包含当前 frps 不支持的 enablePrometheus 字段"
+    failures=$((failures + 1))
+  else
+    log "自检通过：frps.toml 未包含不兼容 enablePrometheus 字段"
+  fi
+
+  if grep -Eq 'path = "/frp-plugin\?node_id=[0-9]+&node_token=' /etc/frp/frps.toml 2>/dev/null; then
+    log "自检通过：frps 插件路径已绑定节点 ID"
+  else
+    warn "自检警告：frps 插件路径未绑定节点 ID；单节点可用，多节点请到面板下载 frps 配置替换"
+  fi
+
+  if [[ -n "${FML_FRPS_DASHBOARD_URL:-}" ]]; then
+    if dashboard_json="$(curl -fsS --connect-timeout 3 --max-time 8 -u "${FML_FRPS_DASHBOARD_USER:-admin}:${FML_FRPS_DASHBOARD_PASSWORD:-${FRPS_WEB_PASSWORD}}" "${FML_FRPS_DASHBOARD_URL%/}/api/serverinfo" 2>/dev/null)"; then
+      if python3 -c 'import json,sys; data=json.loads(sys.argv[1]); assert data.get("version")' "${dashboard_json}" >/dev/null 2>&1; then
+        log "自检通过：frps dashboard 可由宿主机内网地址访问"
+      else
+        warn "自检失败：frps dashboard 返回内容异常"
+        failures=$((failures + 1))
+      fi
+    else
+      warn "自检失败：frps dashboard 不可访问：${FML_FRPS_DASHBOARD_URL}"
+      failures=$((failures + 1))
+    fi
+  else
+    warn "自检失败：未配置 FML_FRPS_DASHBOARD_URL，面板监控不会显示"
+    failures=$((failures + 1))
+  fi
+
+  if docker exec frp-manager-lite python -c 'import base64,json,os,urllib.request; url=os.environ.get("FML_FRPS_DASHBOARD_URL","").rstrip("/")+"/api/serverinfo"; req=urllib.request.Request(url); raw=(os.environ.get("FML_FRPS_DASHBOARD_USER","")+":"+os.environ.get("FML_FRPS_DASHBOARD_PASSWORD","")).encode(); req.add_header("Authorization","Basic "+base64.b64encode(raw).decode()); data=json.loads(urllib.request.urlopen(req,timeout=5).read().decode()); assert data.get("version")' >/dev/null 2>&1; then
+    log "自检通过：面板容器可访问 frps dashboard"
+  else
+    warn "自检失败：面板容器无法访问 frps dashboard，监控可能不显示"
+    failures=$((failures + 1))
+  fi
+
+  if [[ "${ENABLE_PORT_RATE_LIMIT:-1}" == "1" ]]; then
+    if [[ -x /usr/local/sbin/fml-sync-port-rate-limits ]]; then
+      if DRY_RUN=1 /usr/local/sbin/fml-sync-port-rate-limits >/tmp/fml-rate-limit-check.log 2>&1; then
+        log "自检通过：端口速率策略同步脚本可运行"
+      else
+        warn "自检警告：端口速率策略同步预览失败：$(tail -n 1 /tmp/fml-rate-limit-check.log 2>/dev/null || true)"
+      fi
+    else
+      warn "自检失败：端口速率策略同步脚本未安装"
+      failures=$((failures + 1))
+    fi
+  fi
+
+  if [[ -n "${PANEL_DOMAIN}" && "${INSTALL_NGINX}" != "0" ]]; then
+    if nginx -t >/dev/null 2>&1; then
+      log "自检通过：Nginx 配置有效"
+    else
+      warn "自检失败：Nginx 配置无效"
+      failures=$((failures + 1))
+    fi
+  fi
+
+  if (( failures > 0 )); then
+    warn "部署完成但有 ${failures} 项关键自检失败，请按上方提示处理。"
+  else
+    log "全部关键自检通过。"
+  fi
+}
+
 configure_ufw_if_requested() {
   [[ "${ENABLE_UFW}" == "1" ]] || return 0
   export DEBIAN_FRONTEND=noninteractive
@@ -885,7 +1053,7 @@ print_summary() {
   echo "  配置文件：  /etc/frp/frps.toml"
   echo "  地址：      ${FRPS_DOMAIN}:${FRPS_BIND_PORT}"
   echo "  端口池：    ${FRPS_PORT_START}-${FRPS_PORT_END}（TCP/UDP）"
-  echo "  frps 面板： http://127.0.0.1:${FRPS_WEB_PORT}"
+  echo "  frps 面板： ${FML_FRPS_DASHBOARD_URL:-http://${FRPS_DASHBOARD_BIND_ADDR:-127.0.0.1}:${FRPS_WEB_PORT}}（仅供面板内网监控，不建议公网暴露）"
   echo ''
   echo '【常用命令】'
   echo "  改配置：    nano ${ENV_FILE}"
@@ -926,12 +1094,14 @@ main() {
   maybe_registry_login
   write_panel_files
   start_panel
+  configure_frps_dashboard_bridge
   install_frps_binary
   write_frps_config
   install_frps_service
   install_port_rate_limit_sync
   install_nginx_if_requested
   configure_ufw_if_requested
+  run_post_deploy_checks
   print_summary
 }
 
