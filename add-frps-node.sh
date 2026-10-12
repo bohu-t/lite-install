@@ -30,9 +30,9 @@ err()  { echo -e "${RED}❌${NC} $*"; exit 1; }
 
 # `curl ... | sudo bash` 会把 stdin 用作脚本内容；交互输入必须从控制终端读取，
 # 否则 read 会把后续脚本源码当成用户输入。
-if [[ -r /dev/tty ]]; then
-  exec 3</dev/tty
-else
+# 若没有控制终端（例如面板生成的一键命令已把参数全部通过环境变量传入、非交互执行），
+# 则回退到 stdin，且不会因为打开 /dev/tty 失败而被 `set -e` 直接终止。
+if ! { exec 3</dev/tty; } 2>/dev/null; then
   exec 3<&0
 fi
 
