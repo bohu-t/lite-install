@@ -22,6 +22,8 @@ PORT_END="${PORT_END:-}"
 FRPS_DASHBOARD_PORT="${FRPS_DASHBOARD_PORT:-7500}"
 FRPS_DASHBOARD_USER="${FRPS_DASHBOARD_USER:-admin}"
 FRPS_DASHBOARD_PWD="${FRPS_DASHBOARD_PWD:-}"
+BANDWIDTH_MBPS="${BANDWIDTH_MBPS:-0}"
+NOTE="${NOTE:-}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 log()  { echo -e "${GREEN}✅${NC} $*"; }
@@ -269,9 +271,11 @@ print(json.dumps({
     'web_port': int(sys.argv[9]),
     'dashboard_url': sys.argv[10],
     'dashboard_user': sys.argv[11],
-    'dashboard_password': sys.argv[12]
+    'dashboard_password': sys.argv[12],
+    'bandwidth_mbps': int(sys.argv[13] or 0),
+    'note': sys.argv[14]
 }, ensure_ascii=False))
-" "$SETUP_KEY" "$NODE_NAME" "$REGION" "$SERVER_IP" "$FRPS_BIND_PORT" "$FRPS_TOKEN" "$PORT_START" "$PORT_END" "$FRPS_DASHBOARD_PORT" "$DASHBOARD_URL" "$FRPS_DASHBOARD_USER" "$FRPS_DASHBOARD_PWD")"
+" "$SETUP_KEY" "$NODE_NAME" "$REGION" "$SERVER_IP" "$FRPS_BIND_PORT" "$FRPS_TOKEN" "$PORT_START" "$PORT_END" "$FRPS_DASHBOARD_PORT" "$DASHBOARD_URL" "$FRPS_DASHBOARD_USER" "$FRPS_DASHBOARD_PWD" "${BANDWIDTH_MBPS:-0}" "$NOTE")"
 
 API_RESP="$(set +e; curl -sS --connect-timeout 10 -X POST "${PANEL_URL}/api/setup/register-node" \
   -H "Content-Type: application/json" \
