@@ -343,18 +343,18 @@ auth.token = "${FRPS_TOKEN}"
 transport.tcpMux = true
 transport.maxPoolCount = 5
 
+# 仪表盘（仅建议内网访问）
+webServer.addr = "0.0.0.0"
+webServer.port = ${FRPS_DASHBOARD_PORT}
+webServer.user = "${FRPS_DASHBOARD_USER}"
+webServer.password = "${FRPS_DASHBOARD_PWD}"
+
 # 回调面板验权：带上节点身份，面板会校验账号、节点和端口归属。
 [[httpPlugins]]
 name = "frp-manager-lite-auth"
 addr = "${PANEL_HOST}"
 path = "/frp-plugin?node_id=${NODE_ID}&node_token=${NODE_TOKEN_QUERY}"
 ops = ["Login", "NewProxy"]
-
-# 仪表盘（仅建议内网访问）
-webServer.addr = "0.0.0.0"
-webServer.port = ${FRPS_DASHBOARD_PORT}
-webServer.user = "${FRPS_DASHBOARD_USER}"
-webServer.password = "${FRPS_DASHBOARD_PWD}"
 
 # Prometheus 监控指标
 EOF
