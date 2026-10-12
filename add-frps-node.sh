@@ -295,18 +295,52 @@ echo ''
 echo -e "${CYAN}━━━ 第 5 步：安装 frps ━━━${NC}"
 
 FRPS_DIR="/opt/frps-${NODE_NAME}"
-mkdir -p "${FRPS_DIR}"
+SERVICE_NAME="frps-${NODE_NAME}"
+CONFIG_PATH=""
+MANAGED_BY_SYSTEMD=1
+
+# 先看有没有正在运行的 frps 进程：有就沿用它的位置（二进制目录 / 配置 / systemd 服务）
+EXISTING_FRPS_PID=""; EXISTING_FRPS_DIR=""; EXISTING_FRPS_CONF=""; EXISTING_FRPS_SERVICE=""
+detect_running_frps() {
+  command -v pgrep >/dev/null 2>&1 || return 0
+  local pid exe conf svc
+  for pid in $(pgrep -x frps 2>/dev/null || true); do
+    exe="$(readlink -f "/proc/${pid}/exe" 2>/dev/null || true)"
+    [[ -n "$exe" && -x "$exe" ]] || continue
+    conf="$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | sed -n '/^-c$/{n;p;}' | head -1)"
+    svc="$(sed -n 's#^.*/\([^/]*\.service\)$#\1#p' "/proc/${pid}/cgroup" 2>/dev/null | head -1)"
+    EXISTING_FRPS_PID="$pid"
+    EXISTING_FRPS_DIR="$(dirname "$exe")"
+    EXISTING_FRPS_CONF="$conf"
+    EXISTING_FRPS_SERVICE="$svc"
+    return 0
+  done
+}
+detect_running_frps
 
 NEED_INSTALL_FRPS=1
-if [[ -x "${FRPS_DIR}/frps" ]]; then
+if [[ -n "$EXISTING_FRPS_DIR" ]]; then
+  FRPS_DIR="$EXISTING_FRPS_DIR"
+  [[ -n "$EXISTING_FRPS_SERVICE" ]] && SERVICE_NAME="$EXISTING_FRPS_SERVICE"
+  CONFIG_PATH="${EXISTING_FRPS_CONF:-${FRPS_DIR}/frps.toml}"
+  NEED_INSTALL_FRPS=0
+  if [[ -z "$EXISTING_FRPS_SERVICE" ]]; then MANAGED_BY_SYSTEMD=0; fi
+  log "检测到正在运行的 frps（PID ${EXISTING_FRPS_PID}）：${FRPS_DIR}"
+  log "将重写配置 ${CONFIG_PATH} 并重启服务 ${SERVICE_NAME}（不重新下载）"
+elif [[ -x "${FRPS_DIR}/frps" ]]; then
+  CONFIG_PATH="${FRPS_DIR}/frps.toml"
   CURRENT_FRPS_VERSION="$(${FRPS_DIR}/frps --version 2>/dev/null || true)"
   if [[ "$CURRENT_FRPS_VERSION" == "$FRP_VERSION" ]]; then
     NEED_INSTALL_FRPS=0
-    log "检测到 frps ${FRP_VERSION}，跳过下载"
+    log "检测到已安装 frps ${FRP_VERSION}（未运行），跳过下载"
   else
     warn "检测到已有 frps 版本 ${CURRENT_FRPS_VERSION:-未知}，将替换为 ${FRP_VERSION}"
   fi
+else
+  CONFIG_PATH="${FRPS_DIR}/frps.toml"
 fi
+mkdir -p "${FRPS_DIR}"
+[[ -n "$CONFIG_PATH" ]] || CONFIG_PATH="${FRPS_DIR}/frps.toml"
 
 if [[ "$NEED_INSTALL_FRPS" == "1" ]]; then
   log "下载 frps ${FRP_VERSION} (${FRP_ARCH}) …"
@@ -328,7 +362,7 @@ PANEL_HOST="${PANEL_URL#https://}"
 PANEL_HOST="${PANEL_HOST#http://}"
 NODE_TOKEN_QUERY="$(url_encode "${FRPS_TOKEN}")"
 
-cat > "${FRPS_DIR}/frps.toml" << EOF
+cat > "${CONFIG_PATH}" << EOF
 # ───────────────────────────────────
 # frp-manager-lite frps 节点：${NODE_NAME}
 # 地区：${REGION}
@@ -363,19 +397,20 @@ ops = ["Login", "NewProxy"]
 # Prometheus 监控指标
 EOF
 
-log "配置文件已生成：${FRPS_DIR}/frps.toml"
+log "配置文件已生成：${CONFIG_PATH}"
 
 # ── systemd 服务 ────────────────────────────────────────────
 
-SERVICE_NAME="frps-${NODE_NAME}"
-cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
+if [[ "$MANAGED_BY_SYSTEMD" == "1" ]]; then
+  if [[ ! -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+    cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
 [Unit]
 Description=frps node ${NODE_NAME} (${REGION}) for frp-manager-lite
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${FRPS_DIR}/frps -c ${FRPS_DIR}/frps.toml
+ExecStart=${FRPS_DIR}/frps -c ${CONFIG_PATH}
 Restart=always
 RestartSec=10
 LimitNOFILE=1048576
@@ -383,9 +418,15 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-
-systemctl daemon-reload
-systemctl enable --now "${SERVICE_NAME}"
+  else
+    log "复用已有 systemd 服务：${SERVICE_NAME}"
+  fi
+  systemctl daemon-reload
+  systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1 || true
+  systemctl restart "${SERVICE_NAME}"
+else
+  warn "运行中的 frps 不由 systemd 管理；已重写配置 ${CONFIG_PATH}，请手动重启该 frps 进程使其生效"
+fi
 
 # ── 等待启动 ────────────────────────────────────────────────
 
